@@ -1,0 +1,223 @@
+const SUPABASE_URL='https://nnzlaczbomzyfmpkyllo.supabase.co';
+const SUPABASE_KEY='sb_publishable_6w69fwX96lRZpDkbjcEDCA_ptMCU26u';
+const sb=window.supabase.createClient(SUPABASE_URL,SUPABASE_KEY,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}});
+
+let currentUser=null,profile=null,role=null,view='today',authReady=false,authMessage='',authBusy=false,status='';
+let clients=[],selectedClientId='',habits=[],exercises=[],draftTasks=[],todayDay=null,todayTasks=[];
+let calendarDays=[],calendarSelected=null,messages=[],messagesClientId='';
+
+const root=()=>document.getElementById('root');
+const esc=(v='')=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const todayISO=()=>{const d=new Date();return [d.getFullYear(),String(d.getMonth()+1).padStart(2,'0'),String(d.getDate()).padStart(2,'0')].join('-')};
+const prettyDate=(iso=todayISO())=>new Date(iso+'T12:00:00').toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric'});
+const shortDate=(iso)=>new Date(iso+'T12:00:00').toLocaleDateString(undefined,{month:'short',day:'numeric'});
+const monthLabel=(iso)=>new Date(iso+'T12:00:00').toLocaleDateString(undefined,{month:'long',year:'numeric'});
+const timeLabel=(ts)=>new Date(ts).toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
+
+async function initAuth(){
+  const{data:{session}}=await sb.auth.getSession();
+  await hydrate(session);authReady=true;render();
+  sb.auth.onAuthStateChange((_e,s)=>setTimeout(async()=>{await hydrate(s);authReady=true;render()},0));
+}
+
+async function hydrate(session){
+  if(!session){currentUser=profile=role=null;clients=[];todayDay=null;todayTasks=[];calendarDays=[];messages=[];return}
+  currentUser=session.user;
+  const{data:p,error}=await sb.from('profiles').select('id,role,full_name,focus,coach_id').eq('id',currentUser.id).maybeSingle();
+  if(error){authMessage=error.message;return}
+  profile=p;role=p?.role||null;
+  if(role==='coach'){
+    await Promise.all([loadClients(),loadLibraries()]);
+    selectedClientId=selectedClientId||clients[0]?.id||'';
+    messagesClientId=messagesClientId||selectedClientId;
+    view='clients';
+  }else if(role==='client'){
+    await Promise.all([loadToday(),loadCalendar(),loadMessages()]);
+    view='today';
+  }
+  authMessage='';
+}
+
+async function signIn(){
+  const email=(document.getElementById('authEmail')?.value||'').trim().toLowerCase();
+  const password=document.getElementById('authPassword')?.value||'';
+  if(!email||password.length<6){authMessage='Enter your email and password.';render();return}
+  authBusy=true;render();
+  const{data,error}=await sb.auth.signInWithPassword({email,password});
+  authBusy=false;
+  if(error){authMessage=error.message;render();return}
+  await hydrate(data.session);render();
+}
+
+async function setPassword(){
+  const p=document.getElementById('newPassword')?.value||'';
+  if(p.length<6){status='Use at least 6 characters.';render();return}
+  const{error}=await sb.auth.updateUser({password:p});
+  status=error?error.message:'Password saved.';render();
+}
+
+async function logout(){await sb.auth.signOut();currentUser=profile=role=null;render()}
+
+async function loadClients(){
+  const{data,error}=await sb.from('profiles').select('id,full_name,focus,created_at').eq('coach_id',currentUser.id).eq('role','client').order('created_at');
+  if(!error)clients=data||[];
+}
+async function loadLibraries(){
+  const[h,e]=await Promise.all([
+    sb.from('habits').select('*').eq('coach_id',currentUser.id).order('name'),
+    sb.from('exercises').select('*').eq('coach_id',currentUser.id).order('name')
+  ]);
+  habits=h.data||[];exercises=e.data||[];
+}
+async function loadToday(){
+  const{data:d}=await sb.from('days').select('*').eq('client_id',currentUser.id).eq('day_date',todayISO()).maybeSingle();
+  todayDay=d||null;
+  if(!d){todayTasks=[];return}
+  const{data:t}=await sb.from('tasks').select('*').eq('day_id',d.id).order('sort_order');
+  todayTasks=t||[];
+}
+
+async function loadCalendar(){
+  if(role!=='client')return;
+  const{data,error}=await sb.from('days')
+    .select('id,day_date,title,coach_note,client_note,completed_at,tasks(id,name,type,completed,prescribed_sets,prescribed_reps,logged_weight,client_note,pr_achieved,sort_order)')
+    .eq('client_id',currentUser.id)
+    .order('day_date',{ascending:false});
+  if(error){status=error.message;calendarDays=[];return}
+  calendarDays=(data||[]).map(d=>({...d,tasks:(d.tasks||[]).sort((a,b)=>(a.sort_order||0)-(b.sort_order||0))}));
+  if(calendarSelected){calendarSelected=calendarDays.find(d=>d.id===calendarSelected.id)||null}
+}
+
+async function loadMessages(){
+  if(!currentUser||!profile)return;
+  let q=sb.from('messages').select('id,coach_id,client_id,sender_id,body,read_at,created_at').order('created_at',{ascending:true});
+  if(role==='coach'){
+    const cid=messagesClientId||selectedClientId||clients[0]?.id;
+    if(!cid){messages=[];return}
+    messagesClientId=cid;q=q.eq('coach_id',currentUser.id).eq('client_id',cid);
+  }else{
+    q=q.eq('coach_id',profile.coach_id).eq('client_id',currentUser.id);
+  }
+  const{data,error}=await q;
+  if(error){status=error.message;messages=[];return}
+  messages=data||[];
+  const unread=messages.filter(m=>m.sender_id!==currentUser.id&&!m.read_at).map(m=>m.id);
+  if(unread.length)await sb.from('messages').update({read_at:new Date().toISOString()}).in('id',unread);
+}
+
+async function sendMessage(){
+  const body=(document.getElementById('messageBody')?.value||'').trim();
+  if(!body)return;
+  let coach_id,client_id;
+  if(role==='coach'){
+    client_id=messagesClientId||selectedClientId;coach_id=currentUser.id;
+    if(!client_id){status='Choose a client first.';render();return}
+  }else{client_id=currentUser.id;coach_id=profile.coach_id}
+  const{error}=await sb.from('messages').insert({coach_id,client_id,sender_id:currentUser.id,body});
+  if(error){status=error.message;render();return}
+  status='';await loadMessages();render();
+  setTimeout(()=>document.getElementById('messageEnd')?.scrollIntoView({behavior:'smooth'}),0);
+}
+
+async function chooseMessageClient(id){messagesClientId=id;await loadMessages();render()}
+
+async function goView(v){
+  view=v;status='';
+  if(v==='calendar'&&role==='client')await loadCalendar();
+  if(v==='messages')await loadMessages();
+  render();
+}
+
+async function addHabitLibrary(){
+  const name=(document.getElementById('newHabit')?.value||'').trim(),category=(document.getElementById('habitCategory')?.value||'General').trim();
+  if(!name)return;
+  const{error}=await sb.from('habits').insert({coach_id:currentUser.id,name,category});
+  status=error?error.message:'Habit added.';await loadLibraries();render();
+}
+async function addExerciseLibrary(){
+  const name=(document.getElementById('newExercise')?.value||'').trim(),muscle_group=(document.getElementById('muscleGroup')?.value||'General').trim();
+  const default_sets=Number(document.getElementById('defaultSets')?.value||3),default_reps=(document.getElementById('defaultReps')?.value||'10').trim();
+  if(!name)return;
+  const{error}=await sb.from('exercises').insert({coach_id:currentUser.id,name,muscle_group,default_sets,default_reps});
+  status=error?error.message:'Exercise added.';await loadLibraries();render();
+}
+function stageHabit(id){const h=habits.find(x=>x.id===id);if(h)draftTasks.push({type:'habit',name:h.name,habit_id:h.id});render()}
+function stageExercise(id){const e=exercises.find(x=>x.id===id);if(e)draftTasks.push({type:'workout',name:e.name,exercise_id:e.id,prescribed_sets:e.default_sets,prescribed_reps:e.default_reps});render()}
+function removeDraft(i){draftTasks.splice(i,1);render()}
+async function saveDay(){
+  const client_id=document.getElementById('buildClient')?.value||selectedClientId;
+  const day_date=document.getElementById('buildDate')?.value||todayISO();
+  const title=(document.getElementById('dayTitle')?.value||'Training Day').trim();
+  const coach_note=(document.getElementById('coachNote')?.value||'').trim();
+  if(!client_id){status='Choose a client.';render();return}
+  if(!draftTasks.length){status='Add at least one habit or exercise.';render();return}
+  status='Saving…';render();
+  const{data:day,error}=await sb.from('days').upsert({coach_id:currentUser.id,client_id,day_date,title,coach_note},{onConflict:'client_id,day_date'}).select().single();
+  if(error){status=error.message;render();return}
+  await sb.from('tasks').delete().eq('day_id',day.id);
+  const rows=draftTasks.map((t,i)=>({...t,day_id:day.id,sort_order:i,completed:false,pr_achieved:false}));
+  const{error:te}=await sb.from('tasks').insert(rows);
+  status=te?te.message:`Saved ${rows.length} items for ${clients.find(c=>c.id===client_id)?.full_name||'client'}.`;
+  if(!te)draftTasks=[];render();
+}
+async function toggleTask(id,done){const{error}=await sb.from('tasks').update({completed:done}).eq('id',id);status=error?error.message:'';await loadToday();render()}
+async function saveWeight(id){
+  const el=document.getElementById('w_'+id),note=document.getElementById('n_'+id);const v=el?.value?Number(el.value):null;
+  const task=todayTasks.find(t=>t.id===id);const prev=task?.previous_best_weight==null?null:Number(task.previous_best_weight);const pr=v!=null&&prev!=null&&v>prev;
+  const{error}=await sb.from('tasks').update({logged_weight:v,client_note:note?.value||null,completed:true,pr_achieved:pr}).eq('id',id);
+  status=error?error.message:'Workout saved.';await Promise.all([loadToday(),loadCalendar()]);render();
+}
+async function sendInvite(){
+  const full_name=(document.getElementById('inviteName')?.value||'').trim(),email=(document.getElementById('inviteEmail')?.value||'').trim().toLowerCase(),focus=(document.getElementById('inviteFocus')?.value||'').trim();
+  const{error}=await sb.functions.invoke('invite-client',{body:{full_name,email,focus}});
+  status=error?error.message:`Invite sent to ${email}.`;await loadClients();render();
+}
+
+function nav(coach){
+  const items=coach?['clients','build','messages','billing','library']:['today','calendar','messages','profile'];
+  return `<nav class="nav ${coach?'coach':'client'}">${items.map(x=>`<button class="${view===x?'active':''}" onclick="goView('${x}')">${x[0].toUpperCase()+x.slice(1)}</button>`).join('')}</nav>`;
+}
+function shell(body,coach=false){return `<div class="app"><header class="top"><div><p class="eyebrow">ONE DAY</p><h2 style="margin:4px 0 0">${coach?'Coach notebook':'Hi, '+esc((profile?.full_name||'there').split(' ')[0])}</h2></div><button class="btn" onclick="logout()">Log out</button></header><main class="content">${status?`<div class="note"><p>${esc(status)}</p></div>`:''}${body}</main>${nav(coach)}</div>`}
+function loginHTML(){return `<div class="login"><div class="box"><div class="logo">1</div><p class="eyebrow" style="margin-top:14px">ONE DAY</p><h1>Welcome back.</h1><p class="muted">Coach and clients sign in here.</p><div class="stack"><input id="authEmail" type="email" autocomplete="email" placeholder="Email"><input id="authPassword" type="password" autocomplete="current-password" placeholder="Password"><button class="btn primary full" onclick="signIn()">${authBusy?'Working…':'Sign in'}</button></div>${authMessage?`<div class="note"><p>${esc(authMessage)}</p></div>`:''}<p class="small" style="margin-top:14px">New clients activate their account from Maddie’s invite.</p></div></div>`}
+
+function clientsHTML(){return `<div class="row"><div class="grow"><p class="eyebrow">COACH</p><h1>Your clients</h1></div></div>${clients.map(c=>`<div class="card row"><div class="avatar">${esc(c.full_name[0])}</div><div class="grow"><b>${esc(c.full_name)}</b><p class="small">${esc(c.focus||'No focus set')}</p></div><button class="btn" onclick="selectedClientId='${c.id}';view='build';render()">Plan</button></div>`).join('')||'<div class="note">No clients yet.</div>'}<div class="card"><p class="eyebrow">INVITE CLIENT</p><div class="stack"><input id="inviteName" placeholder="Client name"><input id="inviteEmail" type="email" placeholder="Client email"><input id="inviteFocus" placeholder="Focus"><button class="btn primary" onclick="sendInvite()">Send invitation</button></div></div>`}
+function buildHTML(){return `<p class="eyebrow">DAY BUILDER</p><h1>Plan the day</h1><div class="stack"><select id="buildClient">${clients.map(c=>`<option value="${c.id}" ${c.id===selectedClientId?'selected':''}>${esc(c.full_name)}</option>`).join('')}</select><input id="buildDate" type="date" value="${todayISO()}"><input id="dayTitle" value="Training Day" placeholder="Day title"><textarea id="coachNote" placeholder="Coach note"></textarea></div><div class="card"><b>Workout</b><div class="stack" style="margin-top:10px"><select id="exercisePick"><option value="">Choose exercise…</option>${exercises.map(e=>`<option value="${e.id}">${esc(e.name)} · ${e.default_sets}×${esc(e.default_reps)}</option>`).join('')}</select><button class="btn" onclick="stageExercise(document.getElementById('exercisePick').value)">+ Add exercise</button></div></div><div class="card"><b>Habits</b><div class="stack" style="margin-top:10px"><select id="habitPick"><option value="">Choose habit…</option>${habits.map(h=>`<option value="${h.id}">${esc(h.name)}</option>`).join('')}</select><button class="btn" onclick="stageHabit(document.getElementById('habitPick').value)">+ Add habit</button></div></div>${draftTasks.map((t,i)=>`<div class="card row"><div class="grow"><b>${esc(t.name)}</b><p class="small">${t.type==='workout'?`${t.prescribed_sets} × ${esc(t.prescribed_reps)}`:'Habit'}</p></div><button class="btn" onclick="removeDraft(${i})">Remove</button></div>`).join('')}<button class="btn primary full" onclick="saveDay()">Save day</button>`}
+function libraryHTML(){return `<p class="eyebrow">LIBRARY</p><h1>Exercises & habits</h1><div class="card"><b>Add exercise</b><div class="stack" style="margin-top:10px"><input id="newExercise" placeholder="Exercise name"><input id="muscleGroup" placeholder="Muscle group"><input id="defaultSets" type="number" value="3" min="1"><input id="defaultReps" value="10" placeholder="Reps"><button class="btn primary" onclick="addExerciseLibrary()">Add exercise</button></div></div>${exercises.map(e=>`<div class="card"><b>${esc(e.name)}</b><p class="small">${esc(e.muscle_group)} · ${e.default_sets} × ${esc(e.default_reps)}</p></div>`).join('')}<div class="card"><b>Add habit</b><div class="stack" style="margin-top:10px"><input id="newHabit" placeholder="Habit name"><input id="habitCategory" value="General" placeholder="Category"><button class="btn primary" onclick="addHabitLibrary()">Add habit</button></div></div>${habits.map(h=>`<div class="card"><b>${esc(h.name)}</b><p class="small">${esc(h.category)}</p></div>`).join('')}`}
+
+function todayHTML(){
+  if(!todayDay)return `<div class="todayDate">${prettyDate()}</div><p class="motto">You create the life you live.</p><div class="note"><b>Nothing assigned yet.</b><p class="small">Maddie can add your workout and habits from Build.</p></div>`;
+  const done=todayTasks.filter(t=>t.completed).length;
+  return `<div class="todayDate">${prettyDate()}</div><p class="motto">You create the life you live.</p>${todayDay.coach_note?`<div class="note"><p class="eyebrow">FROM MADDIE</p><p>${esc(todayDay.coach_note)}</p></div>`:''}<div class="row"><div class="grow"><h2>${esc(todayDay.title)}</h2></div><b style="color:var(--gold)">${done}/${todayTasks.length}</b></div><div class="progress"><span style="width:${todayTasks.length?done/todayTasks.length*100:0}%"></span></div>${todayTasks.map(t=>t.type==='habit'?`<button class="todo" onclick="toggleTask('${t.id}',${!t.completed})"><span class="check ${t.completed?'done':''}"></span><b class="grow">${esc(t.name)}</b></button>`:`<div class="work"><h3>${esc(t.name)}</h3><p class="small">${t.prescribed_sets||''} × ${esc(t.prescribed_reps||'')}</p>${t.previous_best_weight!=null?`<div class="target">Last best ${t.previous_best_weight} lb · beat it</div>`:''}<div class="weight"><span class="small">Weight</span><input id="w_${t.id}" type="number" value="${t.logged_weight??''}"></div><div class="stack" style="margin-top:10px"><textarea id="n_${t.id}" placeholder="Notes for Maddie">${esc(t.client_note||'')}</textarea><button class="btn primary" onclick="saveWeight('${t.id}')">Save exercise</button></div></div>`).join('')}`;
+}
+
+function calendarDayDetail(d){
+  const done=(d.tasks||[]).filter(t=>t.completed).length,total=(d.tasks||[]).length;
+  return `<div class="card"><div class="row"><button class="btn" onclick="calendarSelected=null;render()">← Back</button><div class="grow"></div><span class="small">${done}/${total}</span></div><p class="eyebrow" style="margin-top:16px">${esc(prettyDate(d.day_date).toUpperCase())}</p><h2>${esc(d.title)}</h2>${d.coach_note?`<div class="note"><b>From Maddie</b><p>${esc(d.coach_note)}</p></div>`:''}${(d.tasks||[]).map(t=>`<div class="todo" style="cursor:default"><span class="check ${t.completed?'done':''}"></span><div class="grow"><b>${esc(t.name)}</b><p class="small">${t.type==='workout'?`${t.prescribed_sets||''} × ${esc(t.prescribed_reps||'')}${t.logged_weight!=null?' · '+t.logged_weight+' lb':''}`:'Habit'}${t.pr_achieved?' · PR':''}</p>${t.client_note?`<p class="small">${esc(t.client_note)}</p>`:''}</div></div>`).join('')||'<p class="muted">No items.</p>'}</div>`;
+}
+function calendarHTML(){
+  if(calendarSelected)return `<p class="eyebrow">CALENDAR</p>${calendarDayDetail(calendarSelected)}`;
+  if(!calendarDays.length)return `<p class="eyebrow">CALENDAR</p><h1>Your schedule</h1><div class="note"><b>No planned days yet.</b><p class="small">When Maddie schedules workouts or habits, they’ll show here.</p></div>`;
+  const groups={};calendarDays.forEach(d=>{const m=monthLabel(d.day_date);(groups[m]??=[]).push(d)});
+  return `<p class="eyebrow">CALENDAR</p><h1>Your schedule</h1>${Object.entries(groups).map(([month,days])=>`<div style="margin-top:22px"><p class="eyebrow">${esc(month)}</p>${days.map(d=>{const done=(d.tasks||[]).filter(t=>t.completed).length,total=(d.tasks||[]).length;const past=d.day_date<todayISO(),today=d.day_date===todayISO();return `<button class="card row full" style="text-align:left" onclick="calendarSelected=calendarDays.find(x=>x.id==='${d.id}');render()"><div style="min-width:58px"><b>${esc(shortDate(d.day_date))}</b><p class="small">${today?'Today':past?'Past':'Upcoming'}</p></div><div class="grow"><b>${esc(d.title)}</b><p class="small">${done}/${total} complete</p></div><span>›</span></button>`}).join('')}</div>`).join('')}`;
+}
+
+function messagesHTML(){
+  if(role==='coach'&&!clients.length)return `<p class="eyebrow">MESSAGES</p><h1>Messages</h1><div class="note">Add a client first.</div>`;
+  const clientSelector=role==='coach'?`<select onchange="chooseMessageClient(this.value)">${clients.map(c=>`<option value="${c.id}" ${c.id===messagesClientId?'selected':''}>${esc(c.full_name)}</option>`).join('')}</select>`:'';
+  return `<p class="eyebrow">MESSAGES</p><h1>${role==='coach'?'Client messages':'Maddie'}</h1>${clientSelector}<div style="margin-top:14px;min-height:260px">${messages.length?messages.map(m=>{const mine=m.sender_id===currentUser.id;return `<div style="display:flex;justify-content:${mine?'flex-end':'flex-start'};margin:10px 0"><div class="card" style="max-width:82%;margin:0;${mine?'background:var(--cream)':''}"><p style="margin:0">${esc(m.body)}</p><p class="small" style="margin-top:6px">${mine?'You':role==='coach'?esc(clients.find(c=>c.id===m.client_id)?.full_name||'Client'):'Maddie'} · ${esc(timeLabel(m.created_at))}</p></div></div>`}).join(''):'<div class="note"><p>No messages yet. Start the conversation.</p></div>'}<div id="messageEnd"></div></div><div class="card"><textarea id="messageBody" placeholder="Write a message…"></textarea><button class="btn primary full" style="margin-top:10px" onclick="sendMessage()">Send message</button></div>`;
+}
+
+function profileHTML(){return `<p class="eyebrow">PROFILE</p><h1>${esc(profile?.full_name||'Client')}</h1><div class="card"><b>Your coach</b><p class="muted">Maddie</p></div><div class="card"><b>Change password</b><p class="small">Choose your own password. It stays private.</p><div class="stack"><input id="newPassword" type="password" placeholder="New password"><button class="btn primary" onclick="setPassword()">Save password</button></div></div>`}
+
+function render(){
+  if(!authReady){root().innerHTML='<div class="login"><div class="box"><h2>One Day</h2><p>Loading…</p></div></div>';return}
+  if(!currentUser||!profile){root().innerHTML=loginHTML();return}
+  if(role==='coach'){
+    let body=view==='clients'?clientsHTML():view==='build'?buildHTML():view==='library'?libraryHTML():view==='messages'?messagesHTML():`<p class="eyebrow">BILLING</p><h1>Billing</h1><div class="note"><p>Stripe billing will be added after the coaching workflow is stable.</p></div>`;
+    root().innerHTML=shell(body,true);return;
+  }
+  let body=view==='today'?todayHTML():view==='calendar'?calendarHTML():view==='messages'?messagesHTML():profileHTML();
+  root().innerHTML=shell(body,false);
+}
+
+initAuth();
