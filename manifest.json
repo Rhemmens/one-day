@@ -1,0 +1,19 @@
+{
+  "name": "One Day",
+  "short_name": "One Day",
+  "description": "One day at a time. Coaching, workouts, habits, and progress.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f7f3e8",
+  "theme_color": "#7e9279",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "./one-day-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
