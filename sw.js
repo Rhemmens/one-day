@@ -1,5 +1,5 @@
-const CACHE='one-day-v1';
-const APP_SHELL=['./','./index.html','./styles.css','./app.js','./manifest.webmanifest','./one-day-icon.svg'];
+const CACHE='one-day-v2';
+const APP_SHELL=['./','./index.html','./styles.css','./app.js','./manifest.json','./one-day-icon.svg'];
 
 self.addEventListener('install',event=>{
   event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(APP_SHELL)));
