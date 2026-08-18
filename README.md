@@ -4,7 +4,7 @@ Beta frontend for One Day coaching app.
 
 ## Deploy
 
-Import this repository into Vercel. The root `index.html` is a static beta build.
+Static frontend deployed via GitHub Pages workflow from `main`.
 
 ## Backend
 
